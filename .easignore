@@ -1,0 +1,14 @@
+# EAS Build ignore file
+node_modules/
+.git/
+android/
+ios/
+.expo/
+dist/
+coverage/
+*.log
+*.lock
+backend/
+docs/
+.env.local
+.env.development

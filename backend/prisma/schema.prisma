@@ -1,0 +1,302 @@
+// backend/prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Shop {
+  id           String      @id @default(uuid())
+  shopName     String
+  ownerName    String
+  email        String      @unique
+  mobile       String
+  gstNumber    String?
+  address      String?
+  businessType String
+  logoUrl      String?
+  currency     String      @default("INR")
+  language     String      @default("en")
+  isActive     Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  deletedAt    DateTime?
+  createdBy    String?
+  updatedBy    String?
+
+  users        User[]
+  customers    Customer[]
+  buyers       Buyer[]
+  invoices     Invoice[]
+  payments     Payment[]
+  reports      Report[]
+  settings     Settings?
+
+  @@index([createdAt])
+}
+
+model User {
+  id           String    @id @default(uuid())
+  shopId       String
+  name         String
+  email        String    @unique
+  mobile       String
+  passwordHash String
+  googleId     String?
+  role         String    @default("owner") // owner, manager, employee, viewer
+  avatar       String?
+  isActive     Boolean   @default(true)
+  lastLogin    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+  createdBy    String?
+  updatedBy    String?
+
+  shop         Shop      @relation(fields: [shopId], references: [id])
+
+  @@index([shopId])
+  @@index([createdAt])
+}
+
+model Customer {
+  id             String    @id @default(uuid())
+  shopId         String
+  customerName   String
+  mobile         String?
+  email          String?
+  address        String?
+  gstNumber      String?
+  openingBalance Float     @default(0.0)
+  creditLimit    Float     @default(0.0)
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+  createdBy      String?
+  updatedBy      String?
+
+  shop           Shop      @relation(fields: [shopId], references: [id])
+  invoices       Invoice[]
+  payments       Payment[]
+
+  @@index([shopId])
+  @@index([customerName])
+  @@index([mobile])
+  @@index([createdAt])
+}
+
+model Buyer {
+  id             String    @id @default(uuid())
+  shopId         String
+  buyerName      String
+  mobile         String?
+  email          String?
+  address        String?
+  gstNumber      String?
+  openingBalance Float     @default(0.0)
+  creditLimit    Float     @default(0.0)
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+  createdBy      String?
+  updatedBy      String?
+
+  shop           Shop      @relation(fields: [shopId], references: [id])
+  invoices       Invoice[]
+
+  @@index([shopId])
+  @@index([buyerName])
+  @@index([mobile])
+  @@index([createdAt])
+}
+
+model Invoice {
+  id             String        @id @default(uuid())
+  shopId         String
+  invoiceNumber  String
+  customerId     String?
+  buyerId        String?
+  invoiceDate    DateTime
+  dueDate        DateTime?
+  subtotal       Float
+  discount       Float         @default(0.0)
+  gst            Float         @default(0.0)
+  transportCharge Float        @default(0.0)
+  packingCharge  Float         @default(0.0)
+  otherCharge    Float         @default(0.0)
+  grandTotal     Float
+  paidAmount     Float         @default(0.0)
+  pendingAmount  Float
+  paymentStatus  String        @default("pending") // paid, pending, partial, overdue
+  notes          String?
+  terms          String?
+  pdfUrl         String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  deletedAt      DateTime?
+  createdBy      String?
+  updatedBy      String?
+
+  shop           Shop          @relation(fields: [shopId], references: [id])
+  customer       Customer?     @relation(fields: [customerId], references: [id])
+  buyer          Buyer?        @relation(fields: [buyerId], references: [id])
+  items          InvoiceItem[]
+  payments       Payment[]
+
+  @@index([shopId])
+  @@index([invoiceNumber])
+  @@index([invoiceDate])
+  @@index([createdAt])
+}
+
+model InvoiceItem {
+  id                  String    @id @default(uuid())
+  invoiceId           String
+  productName         String
+  description         String?
+  alternativeQuantity Float?
+  quantity            Float
+  unit                String
+  rate                Float
+  discount            Float     @default(0.0)
+  gst                 Float     @default(0.0)
+  total               Float
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  deletedAt           DateTime?
+  createdBy           String?
+  updatedBy           String?
+
+  invoice             Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@index([createdAt])
+}
+
+model Payment {
+  id              String    @id @default(uuid())
+  shopId          String
+  invoiceId       String?
+  customerId      String?
+  amount          Float
+  paymentMethod   String // cash, upi, bank, cheque, card
+  paymentDate     DateTime
+  referenceNumber String?
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+  createdBy       String?
+  updatedBy       String?
+
+  shop            Shop      @relation(fields: [shopId], references: [id])
+  invoice         Invoice?  @relation(fields: [invoiceId], references: [id])
+  customer        Customer? @relation(fields: [customerId], references: [id])
+
+  @@index([shopId])
+  @@index([invoiceId])
+  @@index([customerId])
+  @@index([paymentDate])
+  @@index([createdAt])
+}
+
+model Report {
+  id          String    @id @default(uuid())
+  shopId      String
+  reportType  String // sales, outstanding, tax, activity
+  parameters  String? // json config query
+  fileUrl     String?
+  generatedAt DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  createdBy   String?
+  updatedBy   String?
+
+  shop        Shop      @relation(fields: [shopId], references: [id])
+
+  @@index([shopId])
+  @@index([createdAt])
+}
+
+model Session {
+  id        String    @id @default(uuid())
+  shopId    String?
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  createdBy String?
+  updatedBy String?
+
+  @@index([userId])
+  @@index([token])
+  @@index([createdAt])
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  shopId    String?
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  isRevoked Boolean   @default(false)
+  rotatedTo String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  createdBy String?
+  updatedBy String?
+
+  @@index([userId])
+  @@index([token])
+  @@index([createdAt])
+}
+
+model ActivityLog {
+  id        String    @id @default(uuid())
+  shopId    String?
+  userId    String?
+  action    String
+  details   String?
+  ipAddress String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+  createdBy String?
+  updatedBy String?
+
+  @@index([shopId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Settings {
+  id                  String    @id @default(uuid())
+  shopId              String    @unique
+  invoiceNumberFormat String    @default("INV-{YYYY}-{NUMBER}")
+  currency            String    @default("INR")
+  language            String    @default("en")
+  theme               String    @default("light")
+  upiId               String?
+  bankDetails         String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  deletedAt           DateTime?
+  createdBy           String?
+  updatedBy           String?
+
+  shop                Shop      @relation(fields: [shopId], references: [id])
+
+  @@index([shopId])
+  @@index([createdAt])
+}
