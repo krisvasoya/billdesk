@@ -171,7 +171,7 @@ export function InvoiceDetailScreen() {
           <View style={styles.metaDetailsGrid}>
             <View>
               <Text style={styles.detailLabel}>{t('invoices.date', 'Invoice Date')}</Text>
-              <Text style={styles.detailVal}>{formatDate(invoice.date)}</Text>
+              <Text style={styles.detailVal}>{formatDate(invoice.invoiceDate)}</Text>
             </View>
             {invoice.dueDate && (
               <View>
@@ -201,17 +201,17 @@ export function InvoiceDetailScreen() {
         {/* Line Items Card */}
         <View style={styles.itemsCard}>
           <Text style={styles.cardTitle}>{t('invoices.items', 'Line Items')}</Text>
-          {invoice.items.map((item: any) => (
+          {invoice.items.map((item) => (
             <View key={item.id} style={styles.itemRow}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.itemName}>{item.productName}</Text>
                 {item.description ? <Text style={styles.itemDesc}>{item.description}</Text> : null}
                 <Text style={styles.itemMeta}>
-                  {item.quantity} {item.unit} x {CURRENCY_SYMBOL}{item.price}
+                  {item.quantity} {item.unit} x {CURRENCY_SYMBOL}{item.rate}
                   {item.altQuantity ? ` (${item.altQuantity} ${item.altUnit ?? ''})` : ''}
                 </Text>
               </View>
-              <Text style={styles.itemTotal}>{CURRENCY_SYMBOL}{item.amount.toFixed(2)}</Text>
+              <Text style={styles.itemTotal}>{CURRENCY_SYMBOL}{item.total.toFixed(2)}</Text>
             </View>
           ))}
         </View>
@@ -222,40 +222,40 @@ export function InvoiceDetailScreen() {
             <Text style={styles.totalLabel}>{t('invoices.subtotal', 'Subtotal')}</Text>
             <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.subtotal.toFixed(2)}</Text>
           </View>
-          {invoice.discountAmount > 0 && (
+          {invoice.discount > 0 && (
             <View style={styles.totalRow}>
               <Text style={styles.totalLabel}>{t('invoices.discountAmount', 'Discount')}</Text>
-              <Text style={[styles.totalValue, { color: colors.error }]}>-{CURRENCY_SYMBOL}{invoice.discountAmount.toFixed(2)}</Text>
+              <Text style={[styles.totalValue, { color: colors.error }]}>-{CURRENCY_SYMBOL}{invoice.discount.toFixed(2)}</Text>
             </View>
           )}
-          {invoice.taxAmount > 0 && (
+          {invoice.gst > 0 && (
             <View style={styles.totalRow}>
               <Text style={styles.totalLabel}>{t('invoices.taxAmount', 'Tax (GST)')}</Text>
-              <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.taxAmount.toFixed(2)}</Text>
+              <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.gst.toFixed(2)}</Text>
             </View>
           )}
-          {invoice.transportCharge > 0 ? (
+          {invoice.transport > 0 ? (
             <View style={styles.totalRow}>
               <Text style={styles.totalLabel}>{t('invoices.transport', 'Transport Charges')}</Text>
-              <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.transportCharge.toFixed(2)}</Text>
+              <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.transport.toFixed(2)}</Text>
             </View>
           ) : null}
-          {invoice.packingCharge > 0 ? (
+          {invoice.packing > 0 ? (
             <View style={styles.totalRow}>
               <Text style={styles.totalLabel}>{t('invoices.packing', 'Packing Charges')}</Text>
-              <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.packingCharge.toFixed(2)}</Text>
+              <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.packing.toFixed(2)}</Text>
             </View>
           ) : null}
-          {invoice.otherCharge > 0 ? (
+          {invoice.otherCharges > 0 ? (
             <View style={styles.totalRow}>
               <Text style={styles.totalLabel}>{t('invoices.otherCharges', 'Other Charges')}</Text>
-              <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.otherCharge.toFixed(2)}</Text>
+              <Text style={styles.totalValue}>{CURRENCY_SYMBOL}{invoice.otherCharges.toFixed(2)}</Text>
             </View>
           ) : null}
           <View style={styles.divider} />
           <View style={[styles.totalRow, { marginVertical: Spacing.xs }]}>
             <Text style={[styles.totalLabel, styles.totalLabelMain]}>{t('invoices.total', 'Total')}</Text>
-            <Text style={[styles.totalValue, styles.totalValueMain]}>{CURRENCY_SYMBOL}{invoice.total.toFixed(2)}</Text>
+            <Text style={[styles.totalValue, styles.totalValueMain]}>{CURRENCY_SYMBOL}{invoice.grandTotal.toFixed(2)}</Text>
           </View>
 
           {invoice.paidAmount > 0 && (
@@ -264,16 +264,16 @@ export function InvoiceDetailScreen() {
               <Text style={[styles.totalValue, { color: colors.success }]}>-{CURRENCY_SYMBOL}{invoice.paidAmount.toFixed(2)}</Text>
             </View>
           )}
-          {invoice.outstanding > 0 && (
+          {invoice.pendingAmount > 0 && (
             <View style={[styles.totalRow, { marginTop: Spacing.xs }]}>
               <Text style={[styles.totalLabel, { color: colors.error, fontWeight: '700' }]}>{t('invoices.outstanding', 'Outstanding')}</Text>
-              <Text style={[styles.totalValue, { color: colors.error, fontWeight: '700' }]}>{CURRENCY_SYMBOL}{invoice.outstanding.toFixed(2)}</Text>
+              <Text style={[styles.totalValue, { color: colors.error, fontWeight: '700' }]}>{CURRENCY_SYMBOL}{invoice.pendingAmount.toFixed(2)}</Text>
             </View>
           )}
           
           <View style={styles.wordsBox}>
             <Text style={styles.wordsLabel}>{t('common.amountInWords', 'Amount in Words')}:</Text>
-            <Text style={styles.wordsText}>{amountToWords(invoice.total)}</Text>
+            <Text style={styles.wordsText}>{amountToWords(invoice.grandTotal)}</Text>
           </View>
         </View>
 
@@ -291,7 +291,7 @@ export function InvoiceDetailScreen() {
           </View>
         )}
 
-        {invoice.outstanding > 0 && (
+        {invoice.pendingAmount > 0 && (
           <Button
             title={t('invoices.recordPayment', 'Record Payment')}
             icon={<Receipt size={18} color="#FFFFFF" />}
@@ -302,7 +302,7 @@ export function InvoiceDetailScreen() {
                 customerName: invoice.customerName,
                 invoiceId: invoice.id,
                 invoiceNumber: invoice.invoiceNumber,
-                amount: String(invoice.outstanding),
+                amount: String(invoice.pendingAmount),
               }
             })}
             style={styles.paymentButton}

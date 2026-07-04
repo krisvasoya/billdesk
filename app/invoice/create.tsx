@@ -1,6 +1,6 @@
 // app/invoice/create.tsx
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, Alert, Platform, TextInput } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, Alert, Platform, TextInput, Keyboard } from 'react-native';
 import { useSafeAreaBottomPadding } from '../../src/hooks/useTabBarHeight';
 import { useRouter } from 'expo-router';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
@@ -21,11 +21,14 @@ import { productService } from '../../src/services/database/productService';
 import { amountToWords } from '../../src/services/pdfService';
 import { CURRENCY_SYMBOL } from '../../src/constants';
 import { getDatabase } from '../../src/services/database/db';
+import { InvoiceCalculationService } from '../../src/services/invoiceCalculationService';
 
 import { CustomerSearchModal } from '../../src/components/shared/CustomerSearchModal';
 import { BuyerSearchModal } from '../../src/components/shared/BuyerSearchModal';
-import { ItemSearchModal } from '../../src/components/shared/ItemSearchModal';
+import { AddItemModal, type ItemSchemaValues } from '../../src/components/shared/AddItemModal';
 import type { Customer, Buyer, Product } from '../../src/types';
+
+
 
 const itemSchema = z.object({
   productName: z.string().min(1, 'Product Name is required'),
@@ -34,8 +37,8 @@ const itemSchema = z.object({
   unit: z.string().min(1, 'Unit is required'),
   altQuantity: z.coerce.number().nullable().optional(),
   altUnit: z.string().optional().nullable(),
-  price: z.coerce.number().gt(0, 'Price must be greater than 0'),
-  taxRate: z.coerce.number().nonnegative('Tax cannot be negative').default(0),
+  rate: z.coerce.number().gt(0, 'Rate must be greater than 0'),
+  gst: z.coerce.number().nonnegative('Tax cannot be negative').default(0),
   discount: z.coerce.number().nonnegative('Discount cannot be negative').default(0),
 });
 
@@ -51,6 +54,7 @@ const invoiceSchema = z.object({
   notes: z.string().optional(),
   terms: z.string().optional(),
   items: z.array(itemSchema).min(1, 'Please add at least one item'),
+  status: z.enum(['paid', 'pending', 'partial']).default('pending'),
 });
 
 type InvoiceFormValues = z.infer<typeof invoiceSchema>;
@@ -64,18 +68,19 @@ export function CreateInvoiceScreen() {
 
   const [customerSearchVisible, setCustomerSearchVisible] = useState(false);
   const [buyerSearchVisible, setBuyerSearchVisible] = useState(false);
-  const [productSearchVisible, setProductSearchVisible] = useState(false);
   const [itemModalVisible, setItemModalVisible] = useState(false);
+
+  const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
+  const [editingItemData, setEditingItemData] = useState<ItemSchemaValues | undefined>(undefined);
 
   const [selectedCustomer, setSelectedCustomer] = useState<{ id: string; name: string; isTemp?: boolean; mobile?: string; address?: string; gst?: string } | null>(null);
   const [selectedBuyer, setSelectedBuyer] = useState<{ id: string; name: string; isTemp?: boolean; mobile?: string; address?: string; email?: string } | null>(null);
 
-  // Search and dropdown state
   const [customerSearchQuery, setCustomerSearchQuery] = useState('');
   const [buyerSearchQuery, setBuyerSearchQuery] = useState('');
+
   const [customerDropdownOpen, setCustomerDropdownOpen] = useState(false);
   const [buyerDropdownOpen, setBuyerDropdownOpen] = useState(false);
-  const [productDropdownOpen, setProductDropdownOpen] = useState(false);
 
   const { data: allCustomers } = useQuery({
     queryKey: ['customers-all', shopId],
@@ -103,10 +108,6 @@ export function CreateInvoiceScreen() {
     b.name.toLowerCase().includes(buyerSearchQuery.toLowerCase())
   ).slice(0, 8);
 
-  const filteredProducts = (allProducts || []).filter(p =>
-    p.productName.toLowerCase().includes(watchedProductName.toLowerCase())
-  ).slice(0, 8);
-
   const { control, handleSubmit, setValue, watch, formState: { errors } } = useForm<InvoiceFormValues>({
     resolver: zodResolver(invoiceSchema) as any,
     defaultValues: {
@@ -121,42 +122,35 @@ export function CreateInvoiceScreen() {
       notes: '',
       terms: '',
       items: [],
+      status: 'pending',
     },
   });
 
-  const { fields, append, remove } = useFieldArray({
+  const { fields, append, remove, update } = useFieldArray({
     control,
     name: 'items',
   });
 
-interface ItemSchemaValues {
-  productName: string;
-  description?: string;
-  quantity: number;
-  unit: string;
-  altQuantity?: number | null;
-  altUnit?: string | null;
-  price: number;
-  taxRate: number;
-  discount: number;
-}
 
-  // Line Item Form
-  const {
-    control: itemFormCtrl,
-    handleSubmit: handleItemSubmit,
-    reset: resetItemForm,
-    watch: watchItem,
-    setValue: setItemValue,
-    formState: { errors: itemFormErrors }
-  } = useForm<ItemSchemaValues>({
-    resolver: zodResolver(itemSchema) as any,
-    defaultValues: { productName: '', description: '', quantity: undefined as any, unit: 'pcs', altQuantity: null, altUnit: '', price: undefined as any, taxRate: 0, discount: 0 },
-  });
+
+  // Setup logging hooks for every step in the lifecycle
+  useEffect(() => {
+    console.log('[BillDesk] Database initialization status changed. Ready:', shopId ? 'Yes' : 'No');
+  }, [shopId]);
+
+  useEffect(() => {
+    if (allProducts) {
+      console.log(`[BillDesk] Database loaded. Products fetched successfully: ${allProducts.length} items`);
+    }
+  }, [allProducts]);
+
+  useEffect(() => {
+    console.log(`[BillDesk] Add Item Modal visibility changed to: ${itemModalVisible}`);
+  }, [itemModalVisible]);
 
   const createInvoiceMutation = useMutation({
     mutationFn: async (data: InvoiceFormValues) => {
-      // Filter out null/undefined from items
+      // Map item rates and taxes
       const processedItems = data.items.map(item => ({
         productName: item.productName,
         description: item.description || undefined,
@@ -164,79 +158,35 @@ interface ItemSchemaValues {
         unit: item.unit,
         altQuantity: item.altQuantity ?? undefined,
         altUnit: item.altUnit || undefined,
-        price: item.price,
-        taxRate: item.taxRate,
+        rate: item.rate,
+        gst: item.gst,
         discount: item.discount,
       }));
 
       let finalCustomerId = data.customerId;
       let finalCustomerName = selectedCustomer?.name ?? '';
+      let tempCustomerPayload = undefined;
 
-      // Save temporary customer background check
       if (selectedCustomer?.isTemp) {
-        const db = getDatabase();
-        const countRow = await db.getFirstAsync<{ count: number }>(
-          'SELECT COUNT(*) as count FROM invoices WHERE shop_id = ?',
-          [shopId || '']
-        );
-        const count = (countRow?.count ?? 0) + 1;
-        const predictedInvNum = `INV-${String(count).padStart(4, '0')}`;
-
-        const created = await customerService.create(shopId || '', {
+        tempCustomerPayload = {
           name: selectedCustomer.name,
           mobile: selectedCustomer.mobile || undefined,
           address: selectedCustomer.address || undefined,
-          gstNumber: (selectedCustomer as any).gst || (selectedCustomer as any).gstNumber || undefined,
-          creditLimit: 0,
-          openingBalance: 0,
-          notes: `Created via Invoice: ${predictedInvNum}`
-        });
-        finalCustomerId = created.id;
-        finalCustomerName = created.name;
+          gstNumber: selectedCustomer.gst || undefined,
+        };
       }
 
       let finalBuyerId = data.buyerId || undefined;
       let finalBuyerName = selectedBuyer?.name || undefined;
+      let tempBuyerPayload = undefined;
 
-      // Save temporary buyer background check
       if (selectedBuyer?.isTemp) {
-        const db = getDatabase();
-        const countRow = await db.getFirstAsync<{ count: number }>(
-          'SELECT COUNT(*) as count FROM invoices WHERE shop_id = ?',
-          [shopId || '']
-        );
-        const count = (countRow?.count ?? 0) + 1;
-        const predictedInvNum = `INV-${String(count).padStart(4, '0')}`;
-
-        const created = await buyerService.create(shopId || '', {
+        tempBuyerPayload = {
           name: selectedBuyer.name,
           mobile: selectedBuyer.mobile || undefined,
-          address: selectedBuyer.address || undefined,
           email: selectedBuyer.email || undefined,
-          openingBalance: 0,
-          creditLimit: 0,
-          notes: `Created via Invoice: ${predictedInvNum}`
-        });
-        finalBuyerId = created.id;
-        finalBuyerName = created.name;
-      }
-
-      // Check and automatically create missing products in database
-      for (const item of processedItems) {
-        try {
-          const duplicate = await productService.checkDuplicate(shopId || '', item.productName.trim());
-          if (!duplicate) {
-            console.log(`[BillDesk] Auto-creating new product: ${item.productName}`);
-            await productService.create(shopId || '', {
-              productName: item.productName.trim(),
-              unit: item.unit,
-              rate: item.price,
-              gst: item.taxRate,
-            });
-          }
-        } catch (err) {
-          console.error('[BillDesk] Error auto-creating new product:', err);
-        }
+          address: selectedBuyer.address || undefined,
+        };
       }
 
       return invoiceService.create(shopId || '', {
@@ -253,6 +203,9 @@ interface ItemSchemaValues {
         advancePayment: data.advancePayment,
         notes: data.notes,
         terms: data.terms,
+        tempCustomer: tempCustomerPayload,
+        tempBuyer: tempBuyerPayload,
+        status: data.status,
       });
     },
     onSuccess: (newInv) => {
@@ -274,16 +227,22 @@ interface ItemSchemaValues {
   });
 
   const onAddItem = (values: ItemSchemaValues) => {
-    append(values as any);
-    setItemModalVisible(false);
-    resetItemForm({ productName: '', description: '', quantity: undefined as any, unit: 'pcs', altQuantity: null, altUnit: '', price: undefined as any, taxRate: 0, discount: 0 });
-  };
-
-  const handleProductSelect = (product: Product) => {
-    setItemValue('productName', product.productName);
-    setItemValue('price', product.rate);
-    setItemValue('taxRate', product.gst);
-    setItemValue('unit', product.unit);
+    try {
+      if (editingItemIndex !== null) {
+        console.log('[BillDesk] Updating item details at index:', editingItemIndex, values);
+        update(editingItemIndex, values);
+        setEditingItemIndex(null);
+        setEditingItemData(undefined);
+      } else {
+        console.log('[BillDesk] Saving item details to invoice:', values);
+        append(values);
+      }
+      setItemModalVisible(false);
+      console.log('[BillDesk] Item saved successfully.');
+    } catch (e) {
+      console.error('[BillDesk] Error saving item to invoice:', e);
+      Alert.alert('Error', `Failed to save item: ${(e as Error).message}`);
+    }
   };
 
   const selectCustomerObj = (cust: Customer | { id: string; name: string; isTemp: boolean; mobile?: string; address?: string; gst?: string }) => {
@@ -311,30 +270,39 @@ interface ItemSchemaValues {
   };
 
   const formItems = watch('items') || [];
-  const subtotal = formItems.reduce((acc, curr) => acc + curr.price * curr.quantity, 0);
-  const discountAmount = formItems.reduce((acc, curr) => acc + curr.discount, 0);
-  const taxAmount = formItems.reduce((acc, curr) => {
-    const base = curr.price * curr.quantity - curr.discount;
-    return acc + (base * curr.taxRate) / 100;
-  }, 0);
-
   const transport = watch('transportCharge') || 0;
   const packing = watch('packingCharge') || 0;
   const other = watch('otherCharge') || 0;
-  const total = subtotal - discountAmount + taxAmount + transport + packing + other;
-  
   const advance = watch('advancePayment') || 0;
-  const balanceDue = total - advance;
+  const watchedStatus = watch('status') || 'pending';
 
-  // Watching item modal inputs for live preview
-  const watchedPrice = watchItem('price') || 0;
-  const watchedQuantity = watchItem('quantity') || 0;
-  const watchedDiscount = watchItem('discount') || 0;
-  const watchedTaxRate = watchItem('taxRate') || 0;
-  const watchedProductName = watchItem('productName') || '';
+  // Compute live calculations using the InvoiceCalculationService
+  const {
+    subtotal,
+    discount: discountAmount,
+    gst: taxAmount,
+    grandTotal: total,
+    pendingAmount: balanceDue,
+  } = InvoiceCalculationService.calculateInvoice({
+    items: formItems.map(item => ({
+      rate: item.rate,
+      quantity: item.quantity,
+      discount: item.discount,
+      gst: item.gst,
+    })),
+    transport,
+    packing,
+    otherCharges: other,
+    advancePaid: advance,
+  });
 
-  const itemBase = (Number(watchedPrice || 0) * Number(watchedQuantity || 0)) - Number(watchedDiscount || 0);
-  const itemPreviewTotal = Math.max(0, itemBase + (itemBase * Number(watchedTaxRate || 0)) / 100);
+  // Watched item values are declared above to prevent Temporal Dead Zone issues
+
+  useEffect(() => {
+    console.log(`[BillDesk] Invoice updated. Items count: ${fields.length}, Subtotal: ₹${subtotal.toFixed(2)}, Grand Total: ₹${total.toFixed(2)}`);
+  }, [fields, subtotal, total]);
+
+
 
   const bottomPadding = useSafeAreaBottomPadding(Spacing.base);
   const styles = getStyles(colors);
@@ -587,7 +555,24 @@ interface ItemSchemaValues {
         {/* Items Section Header */}
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>{t('invoices.items', 'Line Items')}</Text>
-          <TouchableOpacity style={styles.addButton} onPress={() => setItemModalVisible(true)}>
+          <TouchableOpacity 
+            style={styles.addButton} 
+            onPress={() => {
+              console.log('[BillDesk] "+ Add Item" button clicked');
+              try {
+                Keyboard.dismiss();
+                setCustomerDropdownOpen(false);
+                setBuyerDropdownOpen(false);
+                setTimeout(() => {
+                  setItemModalVisible(true);
+                  console.log('[BillDesk] setItemModalVisible(true) called successfully');
+                }, 100);
+              } catch (e) {
+                console.error('[BillDesk] Exception when opening Add Item modal:', e);
+                Alert.alert('Error', `Could not open Add Item modal: ${(e as Error).message}`);
+              }
+            }}
+          >
             <Plus size={16} color={colors.primary} strokeWidth={2.5} />
             <Text style={styles.addButtonText}>{t('invoices.addItem', 'Add Item')}</Text>
           </TouchableOpacity>
@@ -602,16 +587,41 @@ interface ItemSchemaValues {
           </View>
         ) : (
           fields.map((item, index) => {
-            const itemTotal = item.price * item.quantity - item.discount + (item.price * item.quantity - item.discount) * item.taxRate / 100;
+            const { total: itemTotal } = InvoiceCalculationService.calculateItem({
+              rate: item.rate,
+              quantity: item.quantity,
+              discount: item.discount,
+              gst: item.gst,
+            });
             return (
-              <View key={item.id} style={styles.itemRowCard}>
+              <TouchableOpacity
+                key={item.id}
+                style={styles.itemRowCard}
+                onPress={() => {
+                  console.log('[BillDesk] Editing line item at index:', index);
+                  setEditingItemIndex(index);
+                  setEditingItemData({
+                    productName: item.productName,
+                    description: item.description,
+                    quantity: item.quantity,
+                    unit: item.unit,
+                    altQuantity: item.altQuantity,
+                    altUnit: item.altUnit,
+                    rate: item.rate,
+                    gst: item.gst,
+                    discount: item.discount,
+                  });
+                  setItemModalVisible(true);
+                }}
+                activeOpacity={0.7}
+              >
                 <View style={styles.itemRowLeft}>
                   <Text style={styles.itemName}>{item.productName}</Text>
                   {item.description ? <Text style={styles.itemDesc}>{item.description}</Text> : null}
                   <Text style={styles.itemMeta}>
-                    {item.quantity} {item.unit} x {CURRENCY_SYMBOL}{item.price} 
+                    {item.quantity} {item.unit} x {CURRENCY_SYMBOL}{item.rate} 
                     {item.discount > 0 ? ` · Disc: ${CURRENCY_SYMBOL}${item.discount}` : ''}
-                    {item.taxRate > 0 ? ` · Tax: ${item.taxRate}%` : ''}
+                    {item.gst > 0 ? ` · GST: ${item.gst}%` : ''}
                   </Text>
                   {item.altQuantity ? (
                     <Text style={styles.itemAltQty}>
@@ -621,11 +631,23 @@ interface ItemSchemaValues {
                 </View>
                 <View style={styles.itemRowRight}>
                   <Text style={styles.itemAmount}>{CURRENCY_SYMBOL}{itemTotal.toFixed(2)}</Text>
-                  <TouchableOpacity onPress={() => remove(index)} hitSlop={8}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      Alert.alert(
+                        t('common.delete', 'Delete Item'),
+                        t('invoices.deleteItemText', 'Are you sure you want to remove this item?'),
+                        [
+                          { text: t('common.cancel', 'Cancel'), style: 'cancel' },
+                          { text: t('common.delete', 'Delete'), onPress: () => remove(index), style: 'destructive' },
+                        ]
+                      );
+                    }}
+                    hitSlop={8}
+                  >
                     <Trash2 size={16} color={colors.error} />
                   </TouchableOpacity>
                 </View>
-              </View>
+              </TouchableOpacity>
             );
           })
         )}
@@ -751,6 +773,49 @@ interface ItemSchemaValues {
           </View>
         </View>
 
+        {/* Payment Status Selector */}
+        <View style={styles.statusBox}>
+          <Text style={styles.selectorLabel}>{t('invoices.paymentStatus', 'Payment Status')}</Text>
+          <View style={styles.statusRow}>
+            {([
+              { key: 'paid', label: t('invoices.paid', 'Paid') },
+              { key: 'pending', label: t('invoices.unpaid', 'Unpaid') },
+              { key: 'partial', label: t('invoices.partial', 'Partial') }
+            ] as const).map((st) => {
+              const isSelected = watchedStatus === st.key;
+              return (
+                <TouchableOpacity
+                  key={st.key}
+                  onPress={() => {
+                    setValue('status', st.key);
+                    if (st.key === 'paid') {
+                      setValue('advancePayment', total);
+                    } else if (st.key === 'pending') {
+                      setValue('advancePayment', 0);
+                    }
+                  }}
+                  style={[
+                    styles.statusTab,
+                    isSelected && { backgroundColor: colors.primaryLight, borderColor: colors.primary }
+                  ]}
+                  activeOpacity={0.8}
+                >
+                  <View
+                    style={[
+                      styles.statusDot,
+                      { borderColor: isSelected ? colors.primary : colors.textDisabled },
+                      isSelected && { backgroundColor: colors.primary }
+                    ]}
+                  />
+                  <Text style={[styles.statusText, isSelected && { color: colors.primary, fontWeight: '600' }]}>
+                    {st.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+
         {/* Note / Terms */}
         <Controller
           control={control}
@@ -806,272 +871,18 @@ interface ItemSchemaValues {
         onSelect={selectBuyerObj}
       />
 
-      {/* Item Selection Search Modal */}
-      <ItemSearchModal
-        visible={productSearchVisible}
-        onClose={() => setProductSearchVisible(false)}
+      <AddItemModal
+        visible={itemModalVisible}
+        onClose={() => {
+          console.log('[BillDesk] AddItemModal onClose callback triggered in parent');
+          setItemModalVisible(false);
+          setEditingItemIndex(null);
+          setEditingItemData(undefined);
+        }}
         shopId={shopId || ''}
-        onSelect={handleProductSelect}
+        onAdd={onAddItem}
+        initialData={editingItemData}
       />
-      {/* Add Line Item Form Modal */}
-      <Modal visible={itemModalVisible} animationType="slide" transparent={true} onRequestClose={() => setItemModalVisible(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>{t('invoices.addItem', 'Add Line Item')}</Text>
-              <TouchableOpacity onPress={() => setItemModalVisible(false)}>
-                <X size={22} color={colors.textPrimary} />
-              </TouchableOpacity>
-            </View>
-            <ScrollView
-              contentContainerStyle={styles.modalForm}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-            >
-              
-              {/* Product Name Search with Inline Dropdown */}
-              <View style={{ zIndex: productDropdownOpen ? 1000 : 10, position: 'relative', marginBottom: Spacing.sm }}>
-                <Controller
-                  control={itemFormCtrl}
-                  name="productName"
-                  render={({ field: { onChange, onBlur, value } }) => (
-                    <View>
-                      <Input
-                        label={t('invoices.productName', 'Product Name *')}
-                        placeholder={t('placeholders.productExample', 'e.g. Wheat Flour Bag')}
-                        required
-                        onBlur={() => {
-                          onBlur();
-                          setTimeout(() => setProductDropdownOpen(false), 250);
-                        }}
-                        onFocus={() => setProductDropdownOpen(true)}
-                        onChangeText={(text) => {
-                          onChange(text);
-                          setProductDropdownOpen(true);
-                        }}
-                        value={value}
-                        error={itemFormErrors.productName?.message}
-                      />
-                      {productDropdownOpen && value.trim().length > 0 && (
-                        <View style={[styles.dropdownContainer, { top: 72 }]}>
-                          <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 180 }}>
-                            {filteredProducts.map((p) => (
-                              <TouchableOpacity
-                                key={p.id}
-                                style={styles.dropdownItem}
-                                onPress={() => {
-                                  onChange(p.productName);
-                                  setItemValue('price', p.rate);
-                                  setItemValue('taxRate', p.gst);
-                                  setItemValue('unit', p.unit);
-                                  setProductDropdownOpen(false);
-                                }}
-                              >
-                                <Text style={styles.dropdownItemName}>{p.productName}</Text>
-                                <Text style={styles.dropdownItemSub}>
-                                  {p.unit} · ₹{p.rate.toFixed(2)} · GST: {p.gst}%
-                                </Text>
-                              </TouchableOpacity>
-                            ))}
-                            {filteredProducts.length === 0 && (
-                              <View style={[styles.dropdownItem, { backgroundColor: colors.primaryLight }]}>
-                                <Text style={[styles.dropdownItemName, { color: colors.primary, fontSize: FontSize.sm }]}>
-                                  ✨ {t('products.createNewProduct', 'Create New Product')}: "{value}"
-                                </Text>
-                              </View>
-                            )}
-                          </ScrollView>
-                        </View>
-                      )}
-                    </View>
-                  )}
-                />
-              </View>
-
-              <Controller
-                control={itemFormCtrl}
-                name="description"
-                render={({ field: { onChange, onBlur, value } }) => (
-                  <Input
-                    label={`${t('invoices.description', 'Description')} (${t('common.optional', 'Optional')})`}
-                    placeholder={t('placeholders.descExample', 'e.g. Batch #A12, Grade Premium')}
-                    onBlur={onBlur}
-                    onChangeText={onChange}
-                    value={value ?? ''}
-                    error={itemFormErrors.description?.message}
-                  />
-                )}
-              />
-
-              <View style={styles.dateRow}>
-                <View style={{ flex: 1 }}>
-                  <Controller
-                    control={itemFormCtrl}
-                    name="quantity"
-                    render={({ field: { onChange, onBlur, value } }) => (
-                      <Input
-                        label={`${t('invoices.quantity', 'Quantity')} *`}
-                        placeholder="1"
-                        required
-                        keyboardType="numeric"
-                        onBlur={onBlur}
-                        onChangeText={(text) => onChange(text === '' ? undefined : Number(text))}
-                        value={value === undefined || value === null ? '' : String(value)}
-                        error={itemFormErrors.quantity?.message}
-                      />
-                    )}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Controller
-                    control={itemFormCtrl}
-                    name="unit"
-                    render={({ field: { onChange, onBlur, value } }) => (
-                      <Input
-                        label={`${t('invoices.unit', 'Unit')} *`}
-                        placeholder={t('placeholders.unitDefault', 'pcs')}
-                        required
-                        onBlur={onBlur}
-                        onChangeText={onChange}
-                        value={value}
-                        error={itemFormErrors.unit?.message}
-                      />
-                    )}
-                  />
-                </View>
-              </View>
-
-              <View style={styles.dateRow}>
-                <View style={{ flex: 1 }}>
-                  <Controller
-                    control={itemFormCtrl}
-                    name="altQuantity"
-                    render={({ field: { onChange, onBlur, value } }) => (
-                      <Input
-                        label={t('invoices.altQuantity', 'Alternative Qty')}
-                        placeholder={t('placeholders.qtyExample', 'e.g. 50')}
-                        keyboardType="numeric"
-                        onBlur={onBlur}
-                        onChangeText={(text) => onChange(text === '' ? null : Number(text))}
-                        value={value === undefined || value === null ? '' : String(value)}
-                        error={itemFormErrors.altQuantity?.message}
-                      />
-                    )}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Controller
-                    control={itemFormCtrl}
-                    name="altUnit"
-                    render={({ field: { onChange, onBlur, value } }) => (
-                      <Input
-                        label={t('invoices.altUnit', 'Alternative Unit')}
-                        placeholder={t('placeholders.unitExample', 'e.g. kg')}
-                        onBlur={onBlur}
-                        onChangeText={onChange}
-                        value={value ?? ''}
-                        error={itemFormErrors.altUnit?.message}
-                      />
-                    )}
-                  />
-                </View>
-              </View>
-
-              <Controller
-                control={itemFormCtrl}
-                name="price"
-                render={({ field: { onChange, onBlur, value } }) => (
-                  <Input
-                    label={`${t('invoices.pricePerUnit', 'Price per Unit')} (₹) *`}
-                    placeholder="0.00"
-                    required
-                    keyboardType="numeric"
-                    onBlur={onBlur}
-                    onChangeText={(text) => onChange(text === '' ? undefined : Number(text))}
-                    value={value === undefined || value === null ? '' : String(value)}
-                    error={itemFormErrors.price?.message}
-                  />
-                )}
-              />
-
-              <View style={styles.dateRow}>
-                <View style={{ flex: 1 }}>
-                  <Controller
-                    control={itemFormCtrl}
-                    name="taxRate"
-                    render={({ field: { onChange, onBlur, value } }) => (
-                      <Input
-                        label={`${t('invoices.gstRate', 'GST Rate')} (%)`}
-                        placeholder={t('placeholders.taxExample', 'e.g. 5')}
-                        keyboardType="numeric"
-                        onBlur={onBlur}
-                        onChangeText={(text) => onChange(text === '' ? 0 : Number(text))}
-                        value={value === undefined || value === null ? '' : String(value)}
-                        error={itemFormErrors.taxRate?.message}
-                      />
-                    )}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Controller
-                    control={itemFormCtrl}
-                    name="discount"
-                    render={({ field: { onChange, onBlur, value } }) => (
-                      <Input
-                        label={`${t('invoices.discount', 'Discount')} (₹)`}
-                        placeholder="0.00"
-                        keyboardType="numeric"
-                        onBlur={onBlur}
-                        onChangeText={(text) => onChange(text === '' ? 0 : Number(text))}
-                        value={value === undefined || value === null ? '' : String(value)}
-                        error={itemFormErrors.discount?.message}
-                      />
-                    )}
-                  />
-                </View>
-              </View>
-
-              {/* Automatic Amount Preview Badge */}
-              <View style={{
-                backgroundColor: colors.primaryLight,
-                padding: Spacing.sm,
-                borderRadius: BorderRadius.md,
-                marginTop: Spacing.md,
-                flexDirection: 'row',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                borderWidth: 1,
-                borderColor: colors.primary,
-              }}>
-                <Text style={{ fontSize: FontSize.sm, fontWeight: FontWeight.bold, color: colors.primary }}>
-                  {t('invoices.itemTotal', 'Estimated Total:')}
-                </Text>
-                <Text style={{ fontSize: FontSize.md, fontWeight: FontWeight.bold, color: colors.primary }}>
-                  ₹{itemPreviewTotal.toFixed(2)}
-                </Text>
-              </View>
-
-              {/* Buttons side-by-side */}
-              <View style={{ flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.md, marginBottom: Spacing.xl }}>
-                <TouchableOpacity
-                  style={styles.cancelButton}
-                  onPress={() => setItemModalVisible(false)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.cancelButtonText}>{t('common.cancel', 'Cancel')}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.saveModalButton}
-                  onPress={handleItemSubmit(onAddItem)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.saveModalButtonText}>{t('common.add', 'Save')}</Text>
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -1301,6 +1112,42 @@ const getStyles = (colors: AppColors) => StyleSheet.create({
     fontSize: FontSize.base,
     fontWeight: FontWeight.bold,
     color: '#FFFFFF',
+  },
+  statusBox: {
+    backgroundColor: colors.surface,
+    borderRadius: BorderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: Spacing.base,
+    marginBottom: Spacing.base,
+    ...Shadow.sm,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+    marginTop: Spacing.sm,
+  },
+  statusTab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: BorderRadius.md,
+  },
+  statusDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    borderWidth: 2,
+    marginRight: Spacing.xs,
+  },
+  statusText: {
+    fontSize: FontSize.xs,
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
   },
 });
 

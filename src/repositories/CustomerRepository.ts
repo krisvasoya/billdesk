@@ -18,6 +18,7 @@ const mapRow = (row: Record<string, unknown>): Customer => ({
   outstanding: (row.outstanding as number) || 0,
   createdAt: row.created_at as string,
   updatedAt: row.updated_at as string,
+  deletedAt: row.deleted_at as string | undefined,
 });
 
 export const CustomerRepository = {
@@ -25,13 +26,13 @@ export const CustomerRepository = {
     const db = getDatabase();
     const row = await db.getFirstAsync<Record<string, unknown>>(
       `SELECT c.*,
-        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.customer_id = c.id AND i.shop_id = c.shop_id), 0) as total_billed,
-        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.customer_id = c.id AND p.shop_id = c.shop_id), 0) as total_paid,
-        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.customer_id = c.id AND i.shop_id = c.shop_id), 0) -
-        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.customer_id = c.id AND p.shop_id = c.shop_id), 0) +
+        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.customer_id = c.id AND i.shop_id = c.shop_id AND i.deleted_at IS NULL), 0) as total_billed,
+        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.customer_id = c.id AND p.shop_id = c.shop_id AND p.deleted_at IS NULL), 0) as total_paid,
+        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.customer_id = c.id AND i.shop_id = c.shop_id AND i.deleted_at IS NULL), 0) -
+        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.customer_id = c.id AND p.shop_id = c.shop_id AND p.deleted_at IS NULL), 0) +
         c.opening_balance as outstanding
       FROM customers c
-      WHERE c.shop_id = ? AND c.id = ?`,
+      WHERE c.shop_id = ? AND c.id = ? AND c.deleted_at IS NULL`,
       [shopId, id]
     );
     return row ? mapRow(row) : null;
@@ -45,13 +46,13 @@ export const CustomerRepository = {
     const page = opts?.page ?? 1;
     const pageSize = opts?.pageSize ?? 20;
     const offset = (page - 1) * pageSize;
-    const search = opts?.search ? `%${opts.search}%` : null;
+    const search = opts?.search ? `%${opts.search.trim().toLowerCase()}%` : null;
 
-    const whereClauses = ['c.shop_id = ?'];
+    const whereClauses = ['c.shop_id = ?', 'c.deleted_at IS NULL'];
     const params: (string | number)[] = [shopId];
 
     if (search) {
-      whereClauses.push('(c.name LIKE ? OR c.mobile LIKE ? OR c.email LIKE ? OR c.gst_number LIKE ?)');
+      whereClauses.push('(LOWER(c.name) LIKE ? OR c.mobile LIKE ? OR LOWER(c.email) LIKE ? OR c.gst_number LIKE ?)');
       params.push(search, search, search, search);
     }
 
@@ -59,10 +60,10 @@ export const CustomerRepository = {
 
     const rows = await db.getAllAsync<Record<string, unknown>>(
       `SELECT c.*,
-        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.customer_id = c.id AND i.shop_id = c.shop_id), 0) as total_billed,
-        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.customer_id = c.id AND p.shop_id = c.shop_id), 0) as total_paid,
-        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.customer_id = c.id AND i.shop_id = c.shop_id), 0) -
-        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.customer_id = c.id AND p.shop_id = c.shop_id), 0) +
+        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.customer_id = c.id AND i.shop_id = c.shop_id AND i.deleted_at IS NULL), 0) as total_billed,
+        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.customer_id = c.id AND p.shop_id = c.shop_id AND p.deleted_at IS NULL), 0) as total_paid,
+        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.customer_id = c.id AND i.shop_id = c.shop_id AND i.deleted_at IS NULL), 0) -
+        COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.customer_id = c.id AND p.shop_id = c.shop_id AND p.deleted_at IS NULL), 0) +
         c.opening_balance as outstanding
       FROM customers c
       WHERE ${where}
@@ -88,7 +89,7 @@ export const CustomerRepository = {
 
   async checkDuplicate(shopId: string, name: string, mobile?: string): Promise<Customer | null> {
     const db = getDatabase();
-    let query = 'SELECT id FROM customers WHERE shop_id = ? AND (LOWER(name) = ?';
+    let query = 'SELECT id FROM customers WHERE shop_id = ? AND deleted_at IS NULL AND (LOWER(name) = ?';
     const params: string[] = [shopId, name.trim().toLowerCase()];
     if (mobile && mobile.trim().length > 0) {
       query += ' OR mobile = ?';
@@ -102,7 +103,7 @@ export const CustomerRepository = {
   async create(
     shopId: string,
     id: string,
-    data: Omit<Customer, 'id' | 'shopId' | 'totalBilled' | 'totalPaid' | 'outstanding' | 'createdAt' | 'updatedAt'>
+    data: Omit<Customer, 'id' | 'shopId' | 'totalBilled' | 'totalPaid' | 'outstanding' | 'createdAt' | 'updatedAt' | 'deletedAt'>
   ): Promise<Customer> {
     const db = getDatabase();
     const now = new Date().toISOString();
@@ -146,7 +147,7 @@ export const CustomerRepository = {
   async update(
     shopId: string,
     id: string,
-    data: Partial<Omit<Customer, 'id' | 'shopId' | 'createdAt'>>
+    data: Partial<Omit<Customer, 'id' | 'shopId' | 'createdAt' | 'deletedAt'>>
   ): Promise<Customer> {
     const db = getDatabase();
     const now = new Date().toISOString();
@@ -168,7 +169,7 @@ export const CustomerRepository = {
         credit_limit = COALESCE(?, credit_limit),
         notes = CASE WHEN ? = 1 THEN ? ELSE notes END,
         updated_at = ?
-      WHERE shop_id = ? AND id = ?`,
+      WHERE shop_id = ? AND id = ? AND deleted_at IS NULL`,
       [
         data.name ?? null,
         mobileVal !== undefined ? 1 : 0, mobileVal ?? null,
@@ -189,9 +190,10 @@ export const CustomerRepository = {
 
   async delete(shopId: string, id: string): Promise<void> {
     const db = getDatabase();
+    const now = new Date().toISOString();
     await db.runAsync(
-      'DELETE FROM customers WHERE shop_id = ? AND id = ?',
-      [shopId, id]
+      'UPDATE customers SET deleted_at = ?, updated_at = ? WHERE shop_id = ? AND id = ?',
+      [now, now, shopId, id]
     );
   }
 };

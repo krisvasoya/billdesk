@@ -15,6 +15,7 @@ const mapRow = (row: Record<string, unknown>): Buyer => ({
   notes: row.notes as string | undefined,
   createdAt: row.created_at as string,
   updatedAt: row.updated_at as string,
+  deletedAt: row.deleted_at as string | undefined,
   totalBilled: (row.total_billed as number) || 0,
   totalPaid: (row.total_paid as number) || 0,
   outstanding: (row.outstanding as number) || 0,
@@ -25,10 +26,10 @@ export const BuyerRepository = {
     const db = getDatabase();
     const row = await db.getFirstAsync<Record<string, unknown>>(
       `SELECT b.*,
-        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id), 0) as total_billed,
-        COALESCE((SELECT SUM(i.paid_amount) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id), 0) as total_paid,
-        COALESCE((SELECT SUM(i.pending_amount) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id), 0) + b.opening_balance as outstanding
-      FROM buyers b WHERE b.shop_id = ? AND b.id = ?`,
+        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id AND i.deleted_at IS NULL), 0) as total_billed,
+        COALESCE((SELECT SUM(i.paid_amount) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id AND i.deleted_at IS NULL), 0) as total_paid,
+        COALESCE((SELECT SUM(i.pending_amount) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id AND i.deleted_at IS NULL), 0) + b.opening_balance as outstanding
+      FROM buyers b WHERE b.shop_id = ? AND b.id = ? AND b.deleted_at IS NULL`,
       [shopId, id]
     );
     return row ? mapRow(row) : null;
@@ -42,13 +43,13 @@ export const BuyerRepository = {
     const page = opts?.page ?? 1;
     const pageSize = opts?.pageSize ?? 20;
     const offset = (page - 1) * pageSize;
-    const search = opts?.search ? `%${opts.search}%` : null;
+    const search = opts?.search ? `%${opts.search.trim().toLowerCase()}%` : null;
 
-    const whereClauses = ['b.shop_id = ?'];
+    const whereClauses = ['b.shop_id = ?', 'b.deleted_at IS NULL'];
     const params: (string | number)[] = [shopId];
 
     if (search) {
-      whereClauses.push('(b.name LIKE ? OR b.mobile LIKE ? OR b.email LIKE ?)');
+      whereClauses.push('(LOWER(b.name) LIKE ? OR b.mobile LIKE ? OR LOWER(b.email) LIKE ?)');
       params.push(search, search, search);
     }
 
@@ -63,9 +64,9 @@ export const BuyerRepository = {
 
     const rows = await db.getAllAsync<Record<string, unknown>>(
       `SELECT b.*,
-        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id), 0) as total_billed,
-        COALESCE((SELECT SUM(i.paid_amount) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id), 0) as total_paid,
-        COALESCE((SELECT SUM(i.pending_amount) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id), 0) + b.opening_balance as outstanding
+        COALESCE((SELECT SUM(i.grand_total) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id AND i.deleted_at IS NULL), 0) as total_billed,
+        COALESCE((SELECT SUM(i.paid_amount) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id AND i.deleted_at IS NULL), 0) as total_paid,
+        COALESCE((SELECT SUM(i.pending_amount) FROM invoices i WHERE i.buyer_id = b.id AND i.shop_id = b.shop_id AND i.deleted_at IS NULL), 0) + b.opening_balance as outstanding
       FROM buyers b
       WHERE ${where}
       ORDER BY ${orderBy}
@@ -90,7 +91,7 @@ export const BuyerRepository = {
 
   async checkDuplicate(shopId: string, name: string, mobile?: string): Promise<Buyer | null> {
     const db = getDatabase();
-    let query = 'SELECT id FROM buyers WHERE shop_id = ? AND (LOWER(name) = ?';
+    let query = 'SELECT id FROM buyers WHERE shop_id = ? AND deleted_at IS NULL AND (LOWER(name) = ?';
     const params: string[] = [shopId, name.trim().toLowerCase()];
     if (mobile && mobile.trim().length > 0) {
       query += ' OR mobile = ?';
@@ -104,7 +105,7 @@ export const BuyerRepository = {
   async create(
     shopId: string,
     id: string,
-    data: Omit<Buyer, 'id' | 'shopId' | 'createdAt' | 'updatedAt'>
+    data: Omit<Buyer, 'id' | 'shopId' | 'totalBilled' | 'totalPaid' | 'outstanding' | 'createdAt' | 'updatedAt' | 'deletedAt'>
   ): Promise<Buyer> {
     const db = getDatabase();
     const now = new Date().toISOString();
@@ -147,7 +148,7 @@ export const BuyerRepository = {
   async update(
     shopId: string,
     id: string,
-    data: Partial<Omit<Buyer, 'id' | 'shopId' | 'createdAt'>>
+    data: Partial<Omit<Buyer, 'id' | 'shopId' | 'createdAt' | 'deletedAt'>>
   ): Promise<Buyer> {
     const db = getDatabase();
     const now = new Date().toISOString();
@@ -171,7 +172,7 @@ export const BuyerRepository = {
         credit_limit = CASE WHEN ? = 1 THEN ? ELSE credit_limit END,
         notes = CASE WHEN ? = 1 THEN ? ELSE notes END,
         updated_at = ?
-      WHERE shop_id = ? AND id = ?`,
+      WHERE shop_id = ? AND id = ? AND deleted_at IS NULL`,
       [
         data.name ?? null,
         mobileVal !== undefined ? 1 : 0, mobileVal ?? null,
@@ -192,9 +193,10 @@ export const BuyerRepository = {
 
   async delete(shopId: string, id: string): Promise<void> {
     const db = getDatabase();
+    const now = new Date().toISOString();
     await db.runAsync(
-      'DELETE FROM buyers WHERE shop_id = ? AND id = ?',
-      [shopId, id]
+      'UPDATE buyers SET deleted_at = ?, updated_at = ? WHERE shop_id = ? AND id = ?',
+      [now, now, shopId, id]
     );
   }
 };

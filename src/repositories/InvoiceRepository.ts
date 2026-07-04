@@ -28,6 +28,7 @@ const mapInvoiceRow = (row: Record<string, unknown>, items: InvoiceItem[] = []):
   items,
   createdAt: row.created_at as string,
   updatedAt: row.updated_at as string,
+  deletedAt: row.deleted_at as string | undefined,
 });
 
 const mapItemRow = (row: Record<string, unknown>): InvoiceItem => ({
@@ -50,7 +51,7 @@ export const InvoiceRepository = {
   async getById(shopId: string, id: string): Promise<Invoice | null> {
     const db = getDatabase();
     const row = await db.getFirstAsync<Record<string, unknown>>(
-      'SELECT * FROM invoices WHERE shop_id = ? AND id = ?',
+      'SELECT * FROM invoices WHERE shop_id = ? AND id = ? AND deleted_at IS NULL',
       [shopId, id]
     );
     if (!row) return null;
@@ -81,7 +82,7 @@ export const InvoiceRepository = {
     const pageSize = opts?.pageSize ?? 20;
     const offset = (page - 1) * pageSize;
 
-    const whereClauses = ['shop_id = ?'];
+    const whereClauses = ['shop_id = ?', 'deleted_at IS NULL'];
     const params: (string | number)[] = [shopId];
 
     if (opts?.customerId) {
@@ -105,8 +106,8 @@ export const InvoiceRepository = {
       params.push(opts.endDate);
     }
     if (opts?.search) {
-      const searchWild = `%${opts.search}%`;
-      whereClauses.push('(invoice_number LIKE ? OR customer_name LIKE ? OR invoice_date LIKE ?)');
+      const searchWild = `%${opts.search.trim().toLowerCase()}%`;
+      whereClauses.push('(LOWER(invoice_number) LIKE ? OR LOWER(customer_name) LIKE ? OR invoice_date LIKE ?)');
       params.push(searchWild, searchWild, searchWild);
     }
 
@@ -137,26 +138,25 @@ export const InvoiceRepository = {
 
   async getNextInvoiceNumber(shopId: string, format: string = 'INV-{NUMBER}'): Promise<string> {
     const db = getDatabase();
-    // Fetch last invoice number
-    const lastRow = await db.getFirstAsync<{ invoice_number: string }>(
-      `SELECT invoice_number FROM invoices
-       WHERE shop_id = ? AND invoice_number LIKE ?
-       ORDER BY invoice_date DESC, created_at DESC, invoice_number DESC
-       LIMIT 1`,
-      [shopId, format.replace('{NUMBER}', '%')]
+    const formatPrefix = format.split('{NUMBER}')[0];
+
+    // Fetch matching invoice numbers for this shop to compute absolute max suffix
+    const rows = await db.getAllAsync<{ invoice_number: string }>(
+      `SELECT invoice_number FROM invoices 
+       WHERE shop_id = ? AND invoice_number LIKE ? AND deleted_at IS NULL`,
+      [shopId, formatPrefix + '%']
     );
 
-    let nextNumber = 1;
-    if (lastRow) {
-      // Try to extract digits
-      const formatPrefix = format.split('{NUMBER}')[0];
-      const numberStr = lastRow.invoice_number.replace(formatPrefix, '');
+    let maxNumber = 0;
+    for (const r of rows) {
+      const numberStr = r.invoice_number.replace(formatPrefix, '');
       const num = parseInt(numberStr, 10);
-      if (!isNaN(num)) {
-        nextNumber = num + 1;
+      if (!isNaN(num) && num > maxNumber) {
+        maxNumber = num;
       }
     }
 
+    const nextNumber = maxNumber + 1;
     const paddedNum = nextNumber.toString().padStart(4, '0');
     return format.replace('{NUMBER}', paddedNum);
   },
@@ -164,7 +164,10 @@ export const InvoiceRepository = {
   async create(
     shopId: string,
     id: string,
-    data: Omit<Invoice, 'id' | 'shopId' | 'grandTotal' | 'pendingAmount' | 'createdAt' | 'updatedAt'>
+    data: Omit<Invoice, 'id' | 'shopId' | 'grandTotal' | 'pendingAmount' | 'createdAt' | 'updatedAt' | 'deletedAt'> & {
+      tempCustomer?: { name: string; mobile?: string; email?: string; address?: string; gstNumber?: string };
+      tempBuyer?: { name: string; mobile?: string; email?: string; address?: string };
+    }
   ): Promise<Invoice> {
     const db = getDatabase();
     const now = new Date().toISOString();
@@ -190,9 +193,27 @@ export const InvoiceRepository = {
       status = 'partial';
     }
 
-    // 2. Transaction
+    // 2. Wrap all database mutations inside a single atomic transaction block
     await db.runAsync('BEGIN TRANSACTION;');
     try {
+      // Create Customer if temporary
+      if (data.tempCustomer) {
+        await db.runAsync(
+          `INSERT INTO customers (id, shop_id, name, mobile, email, address, gst_number, opening_balance, credit_limit, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+          [data.customerId, shopId, data.tempCustomer.name, data.tempCustomer.mobile ?? null, data.tempCustomer.email ?? null, data.tempCustomer.address ?? null, data.tempCustomer.gstNumber ?? null, now, now]
+        );
+      }
+
+      // Create Buyer if temporary
+      if (data.tempBuyer) {
+        await db.runAsync(
+          `INSERT INTO buyers (id, shop_id, name, mobile, email, address, opening_balance, credit_limit, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+           [data.buyerId ?? null, shopId, data.tempBuyer.name, data.tempBuyer.mobile ?? null, data.tempBuyer.email ?? null, data.tempBuyer.address ?? null, now, now]
+        );
+      }
+
       // Create Invoice
       await db.runAsync(
         `INSERT INTO invoices (
@@ -209,24 +230,43 @@ export const InvoiceRepository = {
         ]
       );
 
-      // Create Items
+      // Create Items and update inventory
       for (const item of data.items) {
+        let productId = item.productId;
+
+        // If no productId but productName is given, look up or create the product inline
+        if (!productId && item.productName) {
+          const prodRow = await db.getFirstAsync<{ id: string }>(
+            'SELECT id FROM products WHERE shop_id = ? AND LOWER(product_name) = ? AND deleted_at IS NULL LIMIT 1',
+            [shopId, item.productName.trim().toLowerCase()]
+          );
+          if (prodRow) {
+            productId = prodRow.id;
+          } else {
+            productId = 'prod-' + Date.now() + '-' + Math.random().toString(36).substr(2, 5);
+            await db.runAsync(
+              `INSERT INTO products (id, shop_id, product_name, rate, gst, unit, stock, sku, barcode, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, null, null, null, ?, ?)`,
+              [productId, shopId, item.productName.trim(), item.rate, item.gst, item.unit, now, now]
+            );
+          }
+        }
+
         await db.runAsync(
           `INSERT INTO invoice_items (
             id, invoice_id, product_id, product_name, description, alt_quantity, alt_unit,
             quantity, unit, rate, gst, discount, total
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            item.id, id, item.productId, item.productName, item.description ?? null, item.altQuantity ?? null, item.altUnit ?? null,
+            item.id, id, productId ?? null, item.productName, item.description ?? null, item.altQuantity ?? null, item.altUnit ?? null,
             item.quantity, item.unit, item.rate, item.gst, item.discount, item.total
           ]
         );
 
-        // Deduct stock if product exists and stock tracking is on
-        if (item.productId) {
+        if (productId) {
           await db.runAsync(
             `UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ? AND shop_id = ? AND stock IS NOT NULL`,
-            [item.quantity, now, item.productId, shopId]
+            [item.quantity, now, productId, shopId]
           );
         }
       }
@@ -234,7 +274,7 @@ export const InvoiceRepository = {
       await db.runAsync('COMMIT;');
     } catch (error) {
       await db.runAsync('ROLLBACK;');
-      console.error('Invoice create failed:', error);
+      console.error('[BillDesk] Invoice transaction creation rolled back:', error);
       throw error;
     }
 
@@ -245,6 +285,7 @@ export const InvoiceRepository = {
     const db = getDatabase();
     const invoice = await this.getById(shopId, id);
     if (!invoice) return;
+    const now = new Date().toISOString();
 
     await db.runAsync('BEGIN TRANSACTION;');
     try {
@@ -258,19 +299,16 @@ export const InvoiceRepository = {
         }
       }
 
-      // Delete invoice items
-      await db.runAsync('DELETE FROM invoice_items WHERE invoice_id = ?', [id]);
+      // Soft delete linked payments (set deleted_at)
+      await db.runAsync('UPDATE payments SET deleted_at = ?, updated_at = ? WHERE invoice_id = ? AND shop_id = ?', [now, now, id, shopId]);
 
-      // Delete linked payments
-      await db.runAsync('DELETE FROM payments WHERE invoice_id = ? AND shop_id = ?', [id, shopId]);
-
-      // Delete invoice
-      await db.runAsync('DELETE FROM invoices WHERE id = ? AND shop_id = ?', [id, shopId]);
+      // Soft delete invoice (set deleted_at)
+      await db.runAsync('UPDATE invoices SET deleted_at = ?, updated_at = ? WHERE id = ? AND shop_id = ?', [now, now, id, shopId]);
 
       await db.runAsync('COMMIT;');
     } catch (error) {
       await db.runAsync('ROLLBACK;');
-      console.error('Invoice deletion failed:', error);
+      console.error('[BillDesk] Invoice deletion transaction failed:', error);
       throw error;
     }
   },
@@ -283,6 +321,7 @@ export const InvoiceRepository = {
     const newId = 'inv-' + Date.now();
 
     const itemsClean = source.items.map(item => ({
+      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       productId: item.productId,
       quantity: item.quantity,
       unit: item.unit,
@@ -293,6 +332,7 @@ export const InvoiceRepository = {
       description: item.description,
       altQuantity: item.altQuantity,
       altUnit: item.altUnit,
+      total: item.total,
     }));
 
     return this.create(shopId, newId, {

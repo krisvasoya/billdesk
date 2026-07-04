@@ -14,13 +14,14 @@ const mapRow = (row: Record<string, unknown>): Product => ({
   barcode: row.barcode as string | undefined,
   createdAt: row.created_at as string,
   updatedAt: row.updated_at as string,
+  deletedAt: row.deleted_at as string | undefined,
 });
 
 export const ProductRepository = {
   async getById(shopId: string, id: string): Promise<Product | null> {
     const db = getDatabase();
     const row = await db.getFirstAsync<Record<string, unknown>>(
-      'SELECT * FROM products WHERE shop_id = ? AND id = ?',
+      'SELECT * FROM products WHERE shop_id = ? AND id = ? AND deleted_at IS NULL',
       [shopId, id]
     );
     return row ? mapRow(row) : null;
@@ -34,13 +35,13 @@ export const ProductRepository = {
     const page = opts?.page ?? 1;
     const pageSize = opts?.pageSize ?? 20;
     const offset = (page - 1) * pageSize;
-    const search = opts?.search ? `%${opts.search}%` : null;
+    const search = opts?.search ? `%${opts.search.trim().toLowerCase()}%` : null;
 
-    const whereClauses = ['shop_id = ?'];
+    const whereClauses = ['shop_id = ?', 'deleted_at IS NULL'];
     const params: (string | number)[] = [shopId];
 
     if (search) {
-      whereClauses.push('(product_name LIKE ? OR sku LIKE ? OR barcode LIKE ?)');
+      whereClauses.push('(LOWER(product_name) LIKE ? OR LOWER(sku) LIKE ? OR LOWER(barcode) LIKE ?)');
       params.push(search, search, search);
     }
 
@@ -69,14 +70,21 @@ export const ProductRepository = {
     };
   },
 
-  async checkDuplicate(shopId: string, productName: string, sku?: string): Promise<Product | null> {
+  async checkDuplicate(shopId: string, productName: string, sku?: string, barcode?: string): Promise<Product | null> {
     const db = getDatabase();
-    let query = 'SELECT id FROM products WHERE shop_id = ? AND (LOWER(product_name) = ?';
+    let query = 'SELECT id FROM products WHERE shop_id = ? AND deleted_at IS NULL AND (LOWER(product_name) = ?';
     const params: string[] = [shopId, productName.trim().toLowerCase()];
+
     if (sku && sku.trim().length > 0) {
       query += ' OR LOWER(sku) = ?';
       params.push(sku.trim().toLowerCase());
     }
+
+    if (barcode && barcode.trim().length > 0) {
+      query += ' OR LOWER(barcode) = ?';
+      params.push(barcode.trim().toLowerCase());
+    }
+
     query += ') LIMIT 1';
     const row = await db.getFirstAsync<{ id: string }>(query, params);
     return row ? this.getById(shopId, row.id) : null;
@@ -85,14 +93,14 @@ export const ProductRepository = {
   async create(
     shopId: string,
     id: string,
-    data: Omit<Product, 'id' | 'shopId' | 'createdAt' | 'updatedAt'>
+    data: Omit<Product, 'id' | 'shopId' | 'createdAt' | 'updatedAt' | 'deletedAt'>
   ): Promise<Product> {
     const db = getDatabase();
     const now = new Date().toISOString();
 
-    const skuVal = data.sku && data.sku.trim() !== '' ? data.sku.trim() : null;
-    const barcodeVal = data.barcode && data.barcode.trim() !== '' ? data.barcode.trim() : null;
-    const stockVal = data.stock !== undefined ? data.stock : null;
+    const skuVal = (data.sku && data.sku.trim() !== '') ? data.sku.trim() : null;
+    const barcodeVal = (data.barcode && data.barcode.trim() !== '') ? data.barcode.trim() : null;
+    const stockVal = data.stock !== undefined && data.stock !== null ? data.stock : null;
 
     await db.runAsync(
       `INSERT INTO products (id, shop_id, product_name, rate, gst, unit, stock, sku, barcode, created_at, updated_at)
@@ -109,7 +117,7 @@ export const ProductRepository = {
   async update(
     shopId: string,
     id: string,
-    data: Partial<Omit<Product, 'id' | 'shopId' | 'createdAt'>>
+    data: Partial<Omit<Product, 'id' | 'shopId' | 'createdAt' | 'deletedAt'>>
   ): Promise<Product> {
     const db = getDatabase();
     const now = new Date().toISOString();
@@ -128,7 +136,7 @@ export const ProductRepository = {
         sku = CASE WHEN ? = 1 THEN ? ELSE sku END,
         barcode = CASE WHEN ? = 1 THEN ? ELSE barcode END,
         updated_at = ?
-      WHERE shop_id = ? AND id = ?`,
+      WHERE shop_id = ? AND id = ? AND deleted_at IS NULL`,
       [
         data.productName ?? null,
         data.rate ?? null,
@@ -148,9 +156,10 @@ export const ProductRepository = {
 
   async delete(shopId: string, id: string): Promise<void> {
     const db = getDatabase();
+    const now = new Date().toISOString();
     await db.runAsync(
-      'DELETE FROM products WHERE shop_id = ? AND id = ?',
-      [shopId, id]
+      'UPDATE products SET deleted_at = ?, updated_at = ? WHERE shop_id = ? AND id = ?',
+      [now, now, shopId, id]
     );
   },
 
@@ -160,7 +169,7 @@ export const ProductRepository = {
       `SELECT DISTINCT p.* FROM products p
        JOIN invoice_items ii ON ii.product_id = p.id
        JOIN invoices i ON i.id = ii.invoice_id
-       WHERE p.shop_id = ?
+       WHERE p.shop_id = ? AND p.deleted_at IS NULL AND i.deleted_at IS NULL
        ORDER BY i.invoice_date DESC
        LIMIT ?`,
       [shopId, limit]
@@ -173,7 +182,7 @@ export const ProductRepository = {
     const rows = await db.getAllAsync<Record<string, unknown>>(
       `SELECT p.*, COUNT(ii.id) as freq FROM products p
        JOIN invoice_items ii ON ii.product_id = p.id
-       WHERE p.shop_id = ?
+       WHERE p.shop_id = ? AND p.deleted_at IS NULL
        GROUP BY p.id
        ORDER BY freq DESC
        LIMIT ?`,

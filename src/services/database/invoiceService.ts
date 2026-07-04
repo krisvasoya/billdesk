@@ -3,28 +3,10 @@ import { InvoiceRepository } from '../../repositories/InvoiceRepository';
 import { generateId, getDatabase } from './db';
 import type { Invoice, InvoiceItem, InvoiceStatus, PaginatedResult } from '../../types';
 import { syncService } from '../syncService';
+import { InvoiceCalculationService } from '../invoiceCalculationService';
 
-const mapInvoiceToLegacy = (invoice: Invoice): any => {
-  if (!invoice) return null;
-  return {
-    ...invoice,
-    date: invoice.invoiceDate,
-    taxAmount: invoice.gst,
-    discountAmount: invoice.discount,
-    transportCharge: invoice.transport,
-    packingCharge: invoice.packing,
-    otherCharge: invoice.otherCharges,
-    total: invoice.grandTotal,
-    advancePayment: invoice.advancePaid,
-    outstanding: invoice.pendingAmount,
-    paidAmount: (invoice.paidAmount || 0) + (invoice.advancePaid || 0),
-    items: invoice.items ? invoice.items.map(item => ({
-      ...item,
-      price: item.rate,
-      taxRate: item.gst,
-      amount: item.total,
-    })) : [],
-  };
+const mapInvoiceToLegacy = (invoice: Invoice): Invoice => {
+  return invoice; // Directly return camelCase object matching standardized schemas
 };
 
 export const invoiceService = {
@@ -40,7 +22,7 @@ export const invoiceService = {
       page?: number;
       pageSize?: number;
     }
-  ): Promise<PaginatedResult<any>> {
+  ): Promise<PaginatedResult<Invoice>> {
     const res = await InvoiceRepository.getAll(shopId, {
       ...opts,
       startDate: opts?.startDate,
@@ -52,7 +34,7 @@ export const invoiceService = {
     };
   },
 
-  async getById(shopId: string, id: string): Promise<any | null> {
+  async getById(shopId: string, id: string): Promise<Invoice | null> {
     const invoice = await InvoiceRepository.getById(shopId, id);
     return invoice ? mapInvoiceToLegacy(invoice) : null;
   },
@@ -70,30 +52,43 @@ export const invoiceService = {
       buyerName?: string;
       date: string;
       dueDate?: string;
-      items: any[];
+      items: {
+        productId?: string;
+        productName: string;
+        description?: string;
+        altQuantity?: number;
+        altUnit?: string;
+        quantity: number;
+        unit: string;
+        rate: number;
+        gst?: number;
+        discount?: number;
+      }[];
       transportCharge?: number;
       packingCharge?: number;
       otherCharge?: number;
       advancePayment?: number;
       notes?: string;
       terms?: string;
+      tempCustomer?: { name: string; mobile?: string; email?: string; address?: string; gstNumber?: string };
+      tempBuyer?: { name: string; mobile?: string; email?: string; address?: string };
+      status?: InvoiceStatus;
     }
-  ): Promise<any> {
+  ): Promise<Invoice> {
     const id = generateId();
 
-    // Map legacy item schema to new repository schema
     const mappedItems: InvoiceItem[] = data.items.map(item => {
-      const rate = (item as any).price ?? 0;
-      const gst = (item as any).taxRate ?? 0;
-      const quantity = item.quantity ?? 1;
-      const discount = item.discount ?? 0;
-      const base = rate * quantity - discount;
-      const total = base + base * gst / 100;
+      const rate = item.rate || 0;
+      const quantity = item.quantity || 1;
+      const discount = item.discount || 0;
+      const gst = item.gst || 0;
+
+      const { total } = InvoiceCalculationService.calculateItem({ rate, quantity, discount, gst });
 
       return {
         id: generateId(),
         invoiceId: id,
-        productId: (item as any).productId || '',
+        productId: item.productId,
         productName: item.productName,
         description: item.description,
         altQuantity: item.altQuantity,
@@ -107,17 +102,19 @@ export const invoiceService = {
       };
     });
 
-    const subtotal = mappedItems.reduce((sum, item) => sum + item.rate * item.quantity, 0);
-    const discount = mappedItems.reduce((sum, item) => sum + item.discount, 0);
-    const gst = mappedItems.reduce((sum, item) => {
-      const base = item.rate * item.quantity - item.discount;
-      return sum + base * item.gst / 100;
-    }, 0);
-
     const transport = data.transportCharge ?? 0;
     const packing = data.packingCharge ?? 0;
     const otherCharges = data.otherCharge ?? 0;
     const advancePaid = data.advancePayment ?? 0;
+
+    const { subtotal, discount, gst } = InvoiceCalculationService.calculateInvoice({
+      items: mappedItems,
+      transport,
+      packing,
+      otherCharges,
+      advancePaid,
+      paidAmount: 0,
+    });
 
     const dbInvoice = await InvoiceRepository.create(shopId, id, {
       customerId: data.customerId,
@@ -134,16 +131,18 @@ export const invoiceService = {
       packing,
       otherCharges,
       advancePaid,
-      paidAmount: 0, // Initial paid amount is 0 (excluding advance payment)
-      status: 'pending',
+      paidAmount: 0,
+      status: data.status || 'pending',
       notes: data.notes,
       terms: data.terms,
       items: mappedItems,
+      tempCustomer: data.tempCustomer,
+      tempBuyer: data.tempBuyer,
     });
 
     const legacyInvoice = mapInvoiceToLegacy(dbInvoice);
     await syncService.queueOperation('invoice', id, 'create', legacyInvoice).catch(err => {
-      console.warn('Queue operation failed for invoice creation:', err);
+      console.warn('[BillDesk] Queue operation failed for invoice creation:', err);
     });
     return legacyInvoice;
   },
@@ -167,13 +166,12 @@ export const invoiceService = {
       terms?: string;
       status?: InvoiceStatus;
     }
-  ): Promise<any> {
+  ): Promise<Invoice> {
     const db = getDatabase();
     const now = new Date().toISOString();
     const existing = await InvoiceRepository.getById(shopId, id);
     if (!existing) throw new Error('Invoice not found');
 
-    // Run custom updates (like status changes or notes updates) or delegate
     await db.runAsync('BEGIN TRANSACTION;');
     try {
       if (data.status) {
@@ -203,12 +201,12 @@ export const invoiceService = {
     const updated = (await InvoiceRepository.getById(shopId, id))!;
     const legacyInvoice = mapInvoiceToLegacy(updated);
     await syncService.queueOperation('invoice', id, 'update', legacyInvoice).catch(err => {
-      console.warn('Queue operation failed for invoice update:', err);
+      console.warn('[BillDesk] Queue operation failed for invoice update:', err);
     });
     return legacyInvoice;
   },
 
-  async addPayment(shopId: string, id: string, amount: number): Promise<any> {
+  async addPayment(shopId: string, id: string, amount: number): Promise<Invoice> {
     const db = getDatabase();
     const now = new Date().toISOString();
     const invoice = await InvoiceRepository.getById(shopId, id);
@@ -234,7 +232,7 @@ export const invoiceService = {
     const updated = (await InvoiceRepository.getById(shopId, id))!;
     const legacyInvoice = mapInvoiceToLegacy(updated);
     await syncService.queueOperation('invoice', id, 'update', legacyInvoice).catch(err => {
-      console.warn('Queue operation failed for invoice payment update:', err);
+      console.warn('[BillDesk] Queue operation failed for invoice payment update:', err);
     });
     return legacyInvoice;
   },
@@ -243,10 +241,10 @@ export const invoiceService = {
     try {
       await InvoiceRepository.delete(shopId, id);
       await syncService.queueOperation('invoice', id, 'delete', { id }).catch(err => {
-        console.warn('Queue operation failed for invoice delete:', err);
+        console.warn('[BillDesk] Queue operation failed for invoice delete:', err);
       });
     } catch (e) {
-      console.error('SQLite invoice delete service error:', e);
+      console.error('[BillDesk] SQLite invoice delete service error:', e);
       throw e;
     }
   },
@@ -254,7 +252,7 @@ export const invoiceService = {
   async getStats(shopId: string, startDate?: string, endDate?: string): Promise<any> {
     const db = getDatabase();
     const params: string[] = [shopId];
-    let dateFilter = '';
+    let dateFilter = ' AND deleted_at IS NULL';
     if (startDate) { dateFilter += ' AND invoice_date >= ?'; params.push(startDate); }
     if (endDate) { dateFilter += ' AND invoice_date <= ?'; params.push(endDate); }
 
@@ -273,19 +271,19 @@ export const invoiceService = {
     // Today's sales
     const todayStr = new Date().toISOString().split('T')[0];
     const todayRow = await db.getFirstAsync<Record<string, number>>(
-      `SELECT COALESCE(SUM(grand_total), 0) as today_sales FROM invoices WHERE shop_id = ? AND invoice_date = ?`,
+      `SELECT COALESCE(SUM(grand_total), 0) as today_sales FROM invoices WHERE shop_id = ? AND invoice_date = ? AND deleted_at IS NULL`,
       [shopId, todayStr]
     );
 
     // Customer count
     const custRow = await db.getFirstAsync<{ count: number }>(
-      'SELECT COUNT(*) as count FROM customers WHERE shop_id = ?',
+      'SELECT COUNT(*) as count FROM customers WHERE shop_id = ? AND deleted_at IS NULL',
       [shopId]
     );
 
     // Buyer count
     const buyerRow = await db.getFirstAsync<{ count: number }>(
-      'SELECT COUNT(*) as count FROM buyers WHERE shop_id = ?',
+      'SELECT COUNT(*) as count FROM buyers WHERE shop_id = ? AND deleted_at IS NULL',
       [shopId]
     );
 
@@ -302,16 +300,16 @@ export const invoiceService = {
     };
   },
 
-  async duplicate(shopId: string, id: string): Promise<any> {
+  async duplicate(shopId: string, id: string): Promise<Invoice> {
     try {
       const created = await InvoiceRepository.duplicate(shopId, id);
       const legacy = mapInvoiceToLegacy(created);
       await syncService.queueOperation('invoice', created.id, 'create', legacy).catch(err => {
-        console.warn('Queue operation failed for duplicated invoice:', err);
+        console.warn('[BillDesk] Queue operation failed for duplicated invoice:', err);
       });
       return legacy;
     } catch (e) {
-      console.error('SQLite duplicate invoice service error:', e);
+      console.error('[BillDesk] SQLite duplicate invoice service error:', e);
       throw e;
     }
   },

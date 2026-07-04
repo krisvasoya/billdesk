@@ -1,6 +1,6 @@
 // src/services/database/schema.ts
 export const DATABASE_NAME = 'billdesk.db';
-export const DATABASE_VERSION = 5;
+export const DATABASE_VERSION = 6;
 
 export const CREATE_TABLES_SQL = `
   CREATE TABLE IF NOT EXISTS shops (
@@ -51,6 +51,7 @@ export const CREATE_TABLES_SQL = `
     notes TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
     FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE
   );
 
@@ -64,6 +65,7 @@ export const CREATE_TABLES_SQL = `
     notes TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
     FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE
   );
 
@@ -79,6 +81,7 @@ export const CREATE_TABLES_SQL = `
     barcode TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
     FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE
   );
 
@@ -107,6 +110,7 @@ export const CREATE_TABLES_SQL = `
     terms TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
     FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE,
     FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE RESTRICT,
     UNIQUE(shop_id, invoice_number)
@@ -141,6 +145,7 @@ export const CREATE_TABLES_SQL = `
     payment_date TEXT NOT NULL,
     notes TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
     FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE,
     FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE RESTRICT
   );
@@ -285,6 +290,13 @@ export const MIGRATIONS: Record<number, string> = {
 
     ALTER TABLE payments RENAME COLUMN method TO payment_mode;
     ALTER TABLE payments RENAME COLUMN date TO payment_date;
+  `,
+  6: `
+    ALTER TABLE customers ADD COLUMN deleted_at TEXT;
+    ALTER TABLE buyers ADD COLUMN deleted_at TEXT;
+    ALTER TABLE products ADD COLUMN deleted_at TEXT;
+    ALTER TABLE invoices ADD COLUMN deleted_at TEXT;
+    ALTER TABLE payments ADD COLUMN deleted_at TEXT;
   `,
 };
 

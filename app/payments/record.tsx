@@ -405,7 +405,7 @@ export function RecordPaymentScreen() {
                   onPress={() => selectInvoice(item.id, item.invoiceNumber)}
                 >
                   <Text style={styles.customerSelectName}>{item.invoiceNumber}</Text>
-                  <Text style={styles.customerSelectMobile}>{t('dashboard.outstanding', 'Outstanding')}: ₹{item.outstanding}</Text>
+                  <Text style={styles.customerSelectMobile}>{t('dashboard.outstanding', 'Outstanding')}: ₹{item.pendingAmount}</Text>
                 </TouchableOpacity>
               )}
               contentContainerStyle={{ padding: Spacing.base }}

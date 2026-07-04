@@ -14,13 +14,14 @@ const mapRow = (row: Record<string, unknown>): Payment => ({
   paymentDate: row.payment_date as string,
   notes: (row.notes as string) || undefined,
   createdAt: row.created_at as string,
+  deletedAt: row.deleted_at as string | undefined,
 });
 
 export const PaymentRepository = {
   async getById(shopId: string, id: string): Promise<Payment | null> {
     const db = getDatabase();
     const row = await db.getFirstAsync<Record<string, unknown>>(
-      'SELECT * FROM payments WHERE shop_id = ? AND id = ?',
+      'SELECT * FROM payments WHERE shop_id = ? AND id = ? AND deleted_at IS NULL',
       [shopId, id]
     );
     return row ? mapRow(row) : null;
@@ -41,7 +42,7 @@ export const PaymentRepository = {
     const pageSize = opts?.pageSize ?? 20;
     const offset = (page - 1) * pageSize;
 
-    const whereClauses = ['shop_id = ?'];
+    const whereClauses = ['shop_id = ?', 'deleted_at IS NULL'];
     const params: (string | number)[] = [shopId];
 
     if (opts?.customerId) {
@@ -53,8 +54,8 @@ export const PaymentRepository = {
       params.push(opts.invoiceId);
     }
     if (opts?.search) {
-      const searchWild = `%${opts.search}%`;
-      whereClauses.push('(customer_name LIKE ? OR invoice_number LIKE ? OR payment_mode LIKE ?)');
+      const searchWild = `%${opts.search.trim().toLowerCase()}%`;
+      whereClauses.push('(LOWER(customer_name) LIKE ? OR LOWER(invoice_number) LIKE ? OR LOWER(payment_mode) LIKE ?)');
       params.push(searchWild, searchWild, searchWild);
     }
 
@@ -86,7 +87,7 @@ export const PaymentRepository = {
   async create(
     shopId: string,
     id: string,
-    data: Omit<Payment, 'id' | 'shopId' | 'createdAt'>
+    data: Omit<Payment, 'id' | 'shopId' | 'createdAt' | 'deletedAt'>
   ): Promise<Payment> {
     const db = getDatabase();
     const now = new Date().toISOString();
@@ -106,7 +107,7 @@ export const PaymentRepository = {
       // 2. If payment is linked to an invoice, update the invoice paid amount & status
       if (data.invoiceId) {
         const invoice = await db.getFirstAsync<{ grand_total: number; paid_amount: number; advance_paid: number }>(
-          'SELECT grand_total, paid_amount, advance_paid FROM invoices WHERE id = ? AND shop_id = ?',
+          'SELECT grand_total, paid_amount, advance_paid FROM invoices WHERE id = ? AND shop_id = ? AND deleted_at IS NULL',
           [data.invoiceId, shopId]
         );
 
@@ -115,7 +116,7 @@ export const PaymentRepository = {
           const totalPaid = newPaidAmount + invoice.advance_paid;
           const pendingAmount = Math.max(0, invoice.grand_total - totalPaid);
 
-          let status: Payment['invoiceNumber'] = 'pending';
+          let status = 'pending';
           if (pendingAmount === 0) {
             status = 'paid';
           } else if (totalPaid > 0) {
@@ -128,7 +129,7 @@ export const PaymentRepository = {
               pending_amount = ?,
               status = ?,
               updated_at = ?
-             WHERE id = ? AND shop_id = ?`,
+             WHERE id = ? AND shop_id = ? AND deleted_at IS NULL`,
             [newPaidAmount, pendingAmount, status, now, data.invoiceId, shopId]
           );
         }
@@ -148,13 +149,14 @@ export const PaymentRepository = {
     const db = getDatabase();
     const payment = await this.getById(shopId, id);
     if (!payment) return;
+    const now = new Date().toISOString();
 
     await db.runAsync('BEGIN TRANSACTION;');
     try {
       // 1. If payment is linked to an invoice, revert the invoice paid amount
       if (payment.invoiceId) {
         const invoice = await db.getFirstAsync<{ grand_total: number; paid_amount: number; advance_paid: number }>(
-          'SELECT grand_total, paid_amount, advance_paid FROM invoices WHERE id = ? AND shop_id = ?',
+          'SELECT grand_total, paid_amount, advance_paid FROM invoices WHERE id = ? AND shop_id = ? AND deleted_at IS NULL',
           [payment.invoiceId, shopId]
         );
 
@@ -176,16 +178,16 @@ export const PaymentRepository = {
               pending_amount = ?,
               status = ?,
               updated_at = ?
-             WHERE id = ? AND shop_id = ?`,
-            [newPaidAmount, pendingAmount, status, new Date().toISOString(), payment.invoiceId, shopId]
+             WHERE id = ? AND shop_id = ? AND deleted_at IS NULL`,
+            [newPaidAmount, pendingAmount, status, now, payment.invoiceId, shopId]
           );
         }
       }
 
-      // 2. Delete payment row
+      // 2. Soft delete payment row
       await db.runAsync(
-        'DELETE FROM payments WHERE id = ? AND shop_id = ?',
-        [id, shopId]
+        'UPDATE payments SET deleted_at = ?, created_at = ? WHERE id = ? AND shop_id = ?',
+        [now, now, id, shopId]
       );
 
       await db.runAsync('COMMIT;');

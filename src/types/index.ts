@@ -50,6 +50,7 @@ export interface Customer {
   outstanding: number;
   creditLimit?: number;
   notes?: string;
+  deletedAt?: string;
 }
 
 export interface Buyer {
@@ -62,6 +63,7 @@ export interface Buyer {
   notes?: string;
   createdAt: string;
   updatedAt: string;
+  deletedAt?: string;
   // compatibility fields for reports/dashboard queries
   gst?: string;
   openingBalance?: number;
@@ -83,12 +85,13 @@ export interface Product {
   updatedAt: string;
   sku?: string;
   barcode?: string;
+  deletedAt?: string;
 }
 
 export interface InvoiceItem {
   id: string;
   invoiceId: string;
-  productId: string;
+  productId?: string;
   quantity: number;
   unit: string;
   rate: number;
@@ -129,6 +132,7 @@ export interface Invoice {
   notes?: string;
   terms?: string;
   items: InvoiceItem[];
+  deletedAt?: string;
 }
 
 export type PaymentMethod = 'cash' | 'upi' | 'bank' | 'cheque' | 'card';
@@ -145,6 +149,7 @@ export interface Payment {
   createdAt: string;
   customerName: string;
   invoiceNumber?: string;
+  deletedAt?: string;
 }
 
 export interface DashboardStats {
