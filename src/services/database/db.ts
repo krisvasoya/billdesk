@@ -225,41 +225,7 @@ export const initDatabase = async (): Promise<void> => {
     console.error('[BillDesk] Financial data correction failed:', err);
   }
 
-  // Seed demo user if not exists (only in development builds)
-  if (typeof __DEV__ !== 'undefined' && __DEV__) {
-    try {
-      const demoShopId = 'demo-shop-id';
-      const demoUserId = 'demo-user-id';
-      const now = new Date().toISOString();
-
-      // Ensure demo shop exists
-      await db.runAsync(
-        `INSERT OR REPLACE INTO shops (id, shop_name, owner_name, email, phone, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [demoShopId, 'Demo Business Shop', 'Demo Owner', 'demo@billdesk.com', '9999988888', now, now]
-      );
-
-      // Hash password: 'password123'
-      const password = 'password123';
-      let hash = 0;
-      for (let i = 0; i < password.length; i++) {
-        const char = password.charCodeAt(i);
-        hash = (hash << 5) - hash + char;
-        hash = hash & hash;
-      }
-      const demoPasswordHash = 'v2_' + Math.abs(hash).toString(36);
-
-      // Ensure demo user exists with exact password
-      await db.runAsync(
-        `INSERT OR REPLACE INTO users (id, shop_id, full_name, email, mobile, password_hash, role, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [demoUserId, demoShopId, 'Demo User', 'demo@billdesk.com', '9999988888', demoPasswordHash, 'owner', now, now]
-      );
-      console.log('[BillDesk] Successfully seeded/updated demo user demo@billdesk.com / password123');
-    } catch (seedErr) {
-      console.error('[BillDesk] Error seeding demo user:', seedErr);
-    }
-  }
+  // Local demo user seeding logic removed for clean production state
 
   // Re-enable foreign keys
   await db.execAsync('PRAGMA foreign_keys = ON;');
